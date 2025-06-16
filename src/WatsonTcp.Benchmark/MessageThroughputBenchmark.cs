@@ -12,11 +12,11 @@ namespace WatsonTcp.Benchmark
     [MemoryDiagnoser] // To get memory allocation stats
     public class MessageThroughputBenchmark
     {
-        private WatsonTcpServer _server;
-        private WatsonTcpClient _client;
-        private TaskCompletionSource<bool> _tcs;
+        private WatsonTcpServer _server = null!;
+        private WatsonTcpClient _client = null!;
+        private TaskCompletionSource<bool> _tcs = null!;
         private int _messagesToReceive;
-        private byte[] _messagePayload;
+        private byte[] _messagePayload = null!;
 
         private const string ServerIp = "127.0.0.1";
         private const int ServerPort = 9000;
@@ -51,7 +51,7 @@ namespace WatsonTcp.Benchmark
             Console.WriteLine("Benchmark: Client connection attempt finished.");
         }
 
-        private void Server_MessageReceived(object sender, MessageReceivedEventArgs e)
+        private void Server_MessageReceived(object? sender, MessageReceivedEventArgs e)
         {
             // Basic check
             if (e.Data.Length != MessageSize)

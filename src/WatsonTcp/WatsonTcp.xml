@@ -701,6 +701,12 @@
             <param name="offset">The offset within the buffer from which data should be read.</param>
             <param name="count">The number of bytes to read.</param>
         </member>
+        <member name="M:WatsonTcp.WatsonStream.Dispose(System.Boolean)">
+            <summary>
+            Dispose of the object.
+            </summary>
+            <param name="disposing">True if disposing.</param>
+        </member>
         <member name="T:WatsonTcp.WatsonTcpClient">
             <summary>
             Watson TCP client, with or without SSL.

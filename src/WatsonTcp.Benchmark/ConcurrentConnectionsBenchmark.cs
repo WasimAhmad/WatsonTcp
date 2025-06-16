@@ -13,10 +13,10 @@ namespace WatsonTcp.Benchmark
     [MemoryDiagnoser]
     public class ConcurrentConnectionsBenchmark
     {
-        private WatsonTcpServer _server;
-        private List<WatsonTcpClient> _clients;
-        private TaskCompletionSource<bool> _allMessagesSentTcs; // Signaled when all clients have sent all messages
-        private TaskCompletionSource<bool> _allMessagesReceivedTcs; // Signaled when server received all messages
+        private WatsonTcpServer _server = null!;
+        private List<WatsonTcpClient> _clients = null!;
+        private TaskCompletionSource<bool> _allMessagesSentTcs = null!; // Signaled when all clients have sent all messages
+        private TaskCompletionSource<bool> _allMessagesReceivedTcs = null!; // Signaled when server received all messages
 
         private int _totalMessagesToReceive;
         private volatile int _serverMessagesReceivedCount;
@@ -33,7 +33,7 @@ namespace WatsonTcp.Benchmark
 
         public int MessageSize { get; set; } = 128; // Fixed message size for this benchmark for simplicity
 
-        private byte[] _messagePayload;
+        private byte[] _messagePayload = null!;
 
         [GlobalSetup]
         public void GlobalSetup()
@@ -50,13 +50,13 @@ namespace WatsonTcp.Benchmark
             _clients = new List<WatsonTcpClient>();
         }
 
-        private void Server_ClientConnected(object sender, ConnectionEventArgs e)
+        private void Server_ClientConnected(object? sender, ConnectionEventArgs e)
         {
             Interlocked.Increment(ref _clientsReadyCount);
             // Console.WriteLine($"Benchmark (Concurrent): Client connected. Total ready: {_clientsReadyCount}");
         }
 
-        private void Server_MessageReceived(object sender, MessageReceivedEventArgs e)
+        private void Server_MessageReceived(object? sender, MessageReceivedEventArgs e)
         {
             if (Interlocked.Increment(ref _serverMessagesReceivedCount) == _totalMessagesToReceive)
             {

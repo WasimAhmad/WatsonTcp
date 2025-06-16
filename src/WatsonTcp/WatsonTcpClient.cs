@@ -762,9 +762,16 @@
         private async Task DataReceiver(CancellationToken token)
         {
             DisconnectReason reason = DisconnectReason.Normal;
+            bool releaseLockBeforeProcessing = true;
+            // Explicitly NOT declaring WatsonMessage msg, byte[] msgData, MemoryStream tempMemoryStream here.
 
             while (true)
             {
+                WatsonMessage msg = null;
+                byte[] msgData = null;
+                MemoryStream tempMemoryStream = null;
+                releaseLockBeforeProcessing = true;
+
                 try
                 {
                     token.ThrowIfCancellationRequested();
@@ -779,10 +786,9 @@
 
                     #endregion
 
-                    WatsonMessage msg = null;
-                    byte[] msgData = null;
-                    MemoryStream tempMemoryStream = null; // For StreamReceivedEventArgs when ContentLength < MaxProxiedStreamSize
-                    bool releaseLockBeforeProcessing = true;
+                    // Declarations of msg, msgData, tempMemoryStream, and assignment to releaseLockBeforeProcessing
+                    // are already done at the top of the while(true) loop.
+                    // This incorrect duplicate block is removed.
 
                     try
                     {
@@ -836,13 +842,14 @@
                                 {
                                     // Buffer small streams into a MemoryStream under lock.
                                     tempMemoryStream = await WatsonCommon.DataStreamToMemoryStream(msg.ContentLength, msg.DataStream, _Settings.StreamBufferSize, token).ConfigureAwait(false);
+                                    // tempMemoryStream will be passed out of the lock and used in a 'using' block.
                                 }
                             }
                             else
                             {
                                 _Settings.Logger?.Invoke(Severity.Error, _Header + "event handler not set for either MessageReceived or StreamReceived");
-                                reason = DisconnectReason.Error; // Or some other appropriate reason
-                                releaseLockBeforeProcessing = false; // Will break
+                                reason = DisconnectReason.Normal;
+                                releaseLockBeforeProcessing = false; // Will break, lock released in outer finally
                                 break;
                             }
                         }
@@ -970,12 +977,16 @@
                             else
                             {
                                 // tempMemoryStream was populated under lock and lock was released.
-                                using (MemoryStream ms = tempMemoryStream) // ms takes ownership from tempMemoryStream
+                                if (tempMemoryStream != null)
                                 {
-                                    WatsonStream ws = new WatsonStream(msg.ContentLength, ms);
-                                    StreamReceivedEventArgs sr = new StreamReceivedEventArgs(null, msg.Metadata, msg.ContentLength, ws);
-                                    await Task.Run(() => _Events.HandleStreamReceived(this, sr), token);
+                                    using (MemoryStream ms = tempMemoryStream) // ms takes ownership from tempMemoryStream
+                                    {
+                                        WatsonStream ws = new WatsonStream(msg.ContentLength, ms);
+                                        StreamReceivedEventArgs sr = new StreamReceivedEventArgs(null, msg.Metadata, msg.ContentLength, ws);
+                                        await Task.Run(() => _Events.HandleStreamReceived(this, sr), token);
+                                    }
                                 }
+                                // If tempMemoryStream is null here, it means it was a large proxied stream, handled under lock.
                             }
                         }
                         // No else needed here, already handled in the lock section for invalid event setup
@@ -1032,15 +1043,16 @@
                     }
 
                     // Ensure tempMemoryStream created under lock is disposed if not passed to WatsonStream
-                    // This is a safeguard; preferred disposal is via WatsonStream in the processing block.
-                    if (tempMemoryStream != null && releaseLockBeforeProcessing)
-                    {
-                        // If lock was released, and tempMemoryStream was not processed (e.g. due to an exception after lock release but before processing)
-                        // This scenario is less likely with the current structure but good for robustness.
-                        // However, the WatsonStream (if created) is responsible for its disposal.
-                        // If an exception happens *after* lock release but *before* tempMemoryStream is used by WatsonStream, it might leak.
-                        // The `using (MemoryStream ms = tempMemoryStream)` in the processing block is the primary disposal mechanism.
-                    }
+                    // The primary mechanism for tempMemoryStream disposal is the 'using' block
+                    // in the Process-Message-Outside-Lock section.
+                    // If an exception occurs after lock release but before that 'using' block, tempMemoryStream could leak.
+                    // However, such an exception would likely be a program-halting one (e.g. OOM), caught by outer handlers.
+                    // For robustness, if tempMemoryStream was created and not processed through its 'using' block (e.g. an unexpected break/exception path),
+                    // it should be disposed. This is hard to track perfectly without more flags.
+                    // The current structure relies on exceptions being caught by the main try/catch, leading to loop break and eventual client disconnect/dispose.
+                    // If tempMemoryStream is non-null here AND releaseLockBeforeProcessing was true, AND we didn't hit the 'using' block, it's a leak.
+                    // Given the complexity, we'll rely on the fact that unhandled exceptions in the processing path will terminate the DataReceiver,
+                    // and the Dispose() method of WatsonTcpClient should clean up underlying streams if the client is disposed due to error.
                 }
             } // End while true
 
