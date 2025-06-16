@@ -163,6 +163,23 @@
             throw new InvalidOperationException("Stream is not writeable.");
         }
 
+        /// <summary>
+        /// Dispose of the object.
+        /// </summary>
+        /// <param name="disposing">True if disposing.</param>
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                if (_Stream != null)
+                {
+                    _Stream.Dispose();
+                    _Stream = null;
+                }
+            }
+            base.Dispose(disposing);
+        }
+
         #endregion
     }
 }

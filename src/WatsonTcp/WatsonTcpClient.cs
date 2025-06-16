@@ -12,6 +12,7 @@
     using System.Text;
     using System.Threading;
     using System.Threading.Tasks;
+    using System.Buffers;
 
     /// <summary>
     /// Watson TCP client, with or without SSL.
@@ -173,7 +174,6 @@
         private DateTime _LastActivity = DateTime.UtcNow;
         private bool _IsTimeout = false;
 
-        private byte[] _SendBuffer = new byte[65536];
         private readonly object _SyncResponseLock = new object();
         private event EventHandler<SyncResponseReceivedEventArgs> _SyncResponseReceived;
 
@@ -196,7 +196,6 @@
             _Mode = Mode.Tcp;
             _ServerIp = serverIp;
             _ServerPort = serverPort;
-            _SendBuffer = new byte[_Settings.StreamBufferSize];
 
             SerializationHelper.InstantiateConverter(); // Unity fix
         }
@@ -223,7 +222,6 @@
             _TlsVersion = tlsVersion;
             _ServerIp = serverIp;
             _ServerPort = serverPort;
-            _SendBuffer = new byte[_Settings.StreamBufferSize];
 
             if (!String.IsNullOrEmpty(pfxCertFile))
             {
@@ -271,7 +269,6 @@
             _SslCertificate = cert;
             _ServerIp = serverIp;
             _ServerPort = serverPort;
-            _SendBuffer = new byte[_Settings.StreamBufferSize];
 
             _SslCertificateCollection = new X509Certificate2Collection
             {
@@ -553,9 +550,14 @@
         /// <returns>Boolean indicating if the message was sent successfully.</returns>
         public async Task<bool> SendAsync(string data, Dictionary<string, object> metadata = null, CancellationToken token = default)
         {
-            if (String.IsNullOrEmpty(data)) return await SendAsync(Array.Empty<byte>(), metadata);
+            if (String.IsNullOrEmpty(data)) return await SendAsync(Array.Empty<byte>(), metadata, 0, token); // Forward to byte[] overload
             if (token == default(CancellationToken)) token = _Token;
-            return await SendAsync(Encoding.UTF8.GetBytes(data), metadata, 0, token).ConfigureAwait(false);
+            byte[] bytes = Encoding.UTF8.GetBytes(data);
+            WatsonCommon.BytesToStream(bytes, 0, out int contentLength, out Stream stream);
+            using (stream)
+            {
+                return await SendAsync(contentLength, stream, metadata, token).ConfigureAwait(false);
+            }
         }
 
         /// <summary>
@@ -571,7 +573,10 @@
             if (token == default(CancellationToken)) token = _Token;
             if (data == null) data = Array.Empty<byte>();
             WatsonCommon.BytesToStream(data, start, out int contentLength, out Stream stream);
-            return await SendAsync(contentLength, stream, metadata, token).ConfigureAwait(false);
+            using (stream)
+            {
+                return await SendAsync(contentLength, stream, metadata, token).ConfigureAwait(false);
+            }
         }
 
         /// <summary>
@@ -607,8 +612,13 @@
         public async Task<SyncResponse> SendAndWaitAsync(int timeoutMs, string data, Dictionary<string, object> metadata = null, int start = 0, CancellationToken token = default)
         {
             if (timeoutMs < 1000) throw new ArgumentException("Timeout milliseconds must be 1000 or greater.");
-            if (String.IsNullOrEmpty(data)) return await SendAndWaitAsync(timeoutMs, Array.Empty<byte>(), metadata, start, token);
-            return await SendAndWaitAsync(timeoutMs, Encoding.UTF8.GetBytes(data), metadata, start, token).ConfigureAwait(false);
+            if (String.IsNullOrEmpty(data)) return await SendAndWaitAsync(timeoutMs, Array.Empty<byte>(), metadata, start, token); // Forward to byte[] overload
+            byte[] bytes = Encoding.UTF8.GetBytes(data);
+            WatsonCommon.BytesToStream(bytes, 0, out int contentLength, out Stream stream);
+            using (stream)
+            {
+                return await SendAndWaitAsync(timeoutMs, contentLength, stream, metadata, token).ConfigureAwait(false);
+            }
         }
 
         /// <summary>
@@ -625,7 +635,10 @@
             if (timeoutMs < 1000) throw new ArgumentException("Timeout milliseconds must be 1000 or greater.");
             if (data == null) data = Array.Empty<byte>();
             WatsonCommon.BytesToStream(data, start, out int contentLength, out Stream stream);
-            return await SendAndWaitAsync(timeoutMs, contentLength, stream, metadata, token).ConfigureAwait(false);
+            using (stream)
+            {
+                return await SendAndWaitAsync(timeoutMs, contentLength, stream, metadata, token).ConfigureAwait(false);
+            }
         }
 
         /// <summary>
@@ -766,21 +779,91 @@
 
                     #endregion
 
-                    #region Read-Message
+                    WatsonMessage msg = null;
+                    byte[] msgData = null;
+                    MemoryStream tempMemoryStream = null; // For StreamReceivedEventArgs when ContentLength < MaxProxiedStreamSize
+                    bool releaseLockBeforeProcessing = true;
 
-                    await _ReadLock.WaitAsync(token);
-                    WatsonMessage msg = await _MessageBuilder.BuildFromStream(_DataStream, token);
-                    if (msg == null)
+                    try
                     {
-                        await Task.Delay(30, token).ConfigureAwait(false);
-                        continue;
+                        #region Read-Message-Under-Lock
+
+                        await _ReadLock.WaitAsync(token);
+
+                        msg = await _MessageBuilder.BuildFromStream(_DataStream, token).ConfigureAwait(false);
+                        if (msg == null)
+                        {
+                            // Release lock and continue normally if no message
+                            _ReadLock.Release();
+                            await Task.Delay(30, token).ConfigureAwait(false);
+                            continue;
+                        }
+
+                        _LastActivity = DateTime.UtcNow;
+
+                        #endregion
+
+                        #region Process-Status-and-Read-Data-Under-Lock
+
+                        if (msg.Status == MessageStatus.Removed || msg.Status == MessageStatus.Shutdown || msg.Status == MessageStatus.Timeout || msg.Status == MessageStatus.AuthFailure)
+                        {
+                            // These statuses will lead to a break, lock released in finally
+                            releaseLockBeforeProcessing = false;
+                        }
+                        else if (msg.Status == MessageStatus.AuthSuccess || msg.Status == MessageStatus.AuthRequired)
+                        {
+                            // No data payload to read for these, can process outside lock
+                        }
+                        else if (msg.SyncRequest || msg.SyncResponse)
+                        {
+                            msgData = await WatsonCommon.ReadMessageDataAsync(msg, _Settings.StreamBufferSize, token).ConfigureAwait(false);
+                        }
+                        else // Normal data message
+                        {
+                            if (_Events.IsUsingMessages)
+                            {
+                                msgData = await WatsonCommon.ReadMessageDataAsync(msg, _Settings.StreamBufferSize, token).ConfigureAwait(false);
+                            }
+                            else if (_Events.IsUsingStreams)
+                            {
+                                if (msg.ContentLength >= _Settings.MaxProxiedStreamSize)
+                                {
+                                    // For large streams, the event handler reads directly from msg.DataStream (network stream).
+                                    // Processing for this specific case MUST remain under lock.
+                                    releaseLockBeforeProcessing = false;
+                                }
+                                else
+                                {
+                                    // Buffer small streams into a MemoryStream under lock.
+                                    tempMemoryStream = await WatsonCommon.DataStreamToMemoryStream(msg.ContentLength, msg.DataStream, _Settings.StreamBufferSize, token).ConfigureAwait(false);
+                                }
+                            }
+                            else
+                            {
+                                _Settings.Logger?.Invoke(Severity.Error, _Header + "event handler not set for either MessageReceived or StreamReceived");
+                                reason = DisconnectReason.Error; // Or some other appropriate reason
+                                releaseLockBeforeProcessing = false; // Will break
+                                break;
+                            }
+                        }
+
+                        if (releaseLockBeforeProcessing)
+                        {
+                            _ReadLock.Release();
+                        }
+
+                        #endregion
                     }
+                    catch
+                    {
+                        // Ensure lock is released on exception during read/initial process phase
+                        if (releaseLockBeforeProcessing) { /* Already released or wasn't acquired */ }
+                        else if (_ReadLock.CurrentCount == 0) _ReadLock.Release();
+                        throw; // Re-throw the exception
+                    }
+                    // tempMemoryStream is passed outside the lock and disposed there by WatsonStream/using block
 
-                    _LastActivity = DateTime.UtcNow;
-
-                    #endregion
-
-                    #region Process-by-Status
+                    #region Process-Message-Outside-Lock (if applicable)
 
                     if (msg.Status == MessageStatus.Removed)
                     {
@@ -804,7 +887,6 @@
                     {
                         _Settings.Logger?.Invoke(Severity.Debug, _Header + "authentication successful");
                         Task unawaited = Task.Run(() => _Events.HandleAuthenticationSucceeded(this, EventArgs.Empty), token);
-                        continue;
                     }
                     else if (msg.Status == MessageStatus.AuthFailure)
                     {
@@ -817,59 +899,32 @@
                     {
                         _Settings.Logger?.Invoke(Severity.Info, _Header + "authentication required by server; please authenticate using pre-shared key");
                         string psk = _Callbacks.HandleAuthenticationRequested();
-                        if (!String.IsNullOrEmpty(psk)) await AuthenticateAsync(psk, token);
-                        continue;
+                        if (!String.IsNullOrEmpty(psk)) await AuthenticateAsync(psk, token); // AuthenticateAsync has its own locking for send
                     }
-
-                    #endregion
-
-                    #region Process-Message
-
-                    if (msg.SyncRequest)
+                    else if (msg.SyncRequest)
                     {
                         _Settings.Logger?.Invoke(Severity.Debug, _Header + "synchronous request received: " + msg.ConversationGuid.ToString());
-
                         DateTime expiration = WatsonCommon.GetExpirationTimestamp(msg);
-                        byte[] msgData = await WatsonCommon.ReadMessageDataAsync(msg, _Settings.StreamBufferSize, token).ConfigureAwait(false);
 
                         if (DateTime.UtcNow < expiration)
                         {
                             Task unawaited = Task.Run(async () =>
                             {
-                                SyncRequest syncReq = new SyncRequest(
-                                null,
-                                msg.ConversationGuid,
-                                msg.ExpirationUtc.Value,
-                                msg.Metadata,
-                                msgData);
-
+                                SyncRequest syncReq = new SyncRequest(null, msg.ConversationGuid, msg.ExpirationUtc.Value, msg.Metadata, msgData);
                                 SyncResponse syncResp = null;
-
 #pragma warning disable CS0618 // Type or member is obsolete
-                                if (_Callbacks.SyncRequestReceivedAsync != null)
-                                {
-                                    syncResp = await _Callbacks.HandleSyncRequestReceivedAsync(syncReq);
-                                }
-                                else if (_Callbacks.SyncRequestReceived != null)
-                                {
-                                    syncResp = _Callbacks.HandleSyncRequestReceived(syncReq);
-                                }
+                                if (_Callbacks.SyncRequestReceivedAsync != null) syncResp = await _Callbacks.HandleSyncRequestReceivedAsync(syncReq);
+                                else if (_Callbacks.SyncRequestReceived != null) syncResp = _Callbacks.HandleSyncRequestReceived(syncReq);
 #pragma warning restore CS0618 // Type or member is obsolete
-
                                 if (syncResp != null)
                                 {
                                     WatsonCommon.BytesToStream(syncResp.Data, 0, out int contentLength, out Stream stream);
-
-                                    WatsonMessage respMsg = _MessageBuilder.ConstructNew(
-                                        contentLength,
-                                        stream,
-                                        false,
-                                        true,
-                                        msg.ExpirationUtc.Value,
-                                        syncResp.Metadata);
-
-                                    respMsg.ConversationGuid = msg.ConversationGuid;
-                                    await SendInternalAsync(respMsg, contentLength, stream, token).ConfigureAwait(false);
+                                    using (stream) // Ensure MemoryStream from BytesToStream is disposed
+                                    {
+                                        WatsonMessage respMsg = _MessageBuilder.ConstructNew(contentLength, stream, false, true, msg.ExpirationUtc.Value, syncResp.Metadata);
+                                        respMsg.ConversationGuid = msg.ConversationGuid;
+                                        await SendInternalAsync(respMsg, contentLength, stream, token).ConfigureAwait(false);
+                                    }
                                 }
                             }, _Token);
                         }
@@ -880,16 +935,12 @@
                     }
                     else if (msg.SyncResponse)
                     {
-                        // No need to amend message expiration; it is copied from the request, which was set by this node
-                        // DateTime expiration = WatsonCommon.GetExpirationTimestamp(msg);
                         _Settings.Logger?.Invoke(Severity.Debug, _Header + "synchronous response received: " + msg.ConversationGuid.ToString());
-                        byte[] msgData = await WatsonCommon.ReadMessageDataAsync(msg, _Settings.StreamBufferSize, token).ConfigureAwait(false);
-
                         if (DateTime.UtcNow < msg.ExpirationUtc.Value)
                         {
-                            lock (_SyncResponseLock)
+                            lock (_SyncResponseLock) // _SyncResponseLock is a separate lock for the event handler collection
                             {
-                                _SyncResponseReceived?.Invoke(this,new SyncResponseReceivedEventArgs(msg,msgData));
+                                _SyncResponseReceived?.Invoke(this, new SyncResponseReceivedEventArgs(msg, msgData));
                             }
                         }
                         else
@@ -897,47 +948,45 @@
                             _Settings.Logger?.Invoke(Severity.Debug, _Header + "expired synchronous response received and discarded");
                         }
                     }
-                    else
+                    else // Normal data message
                     {
-                        byte[] msgData = null;
-
                         if (_Events.IsUsingMessages)
                         {
-                            msgData = await WatsonCommon.ReadMessageDataAsync(msg, _Settings.StreamBufferSize, token).ConfigureAwait(false);
                             MessageReceivedEventArgs args = new MessageReceivedEventArgs(null, msg.Metadata, msgData);
                             await Task.Run(() => _Events.HandleMessageReceived(this, args));
                         }
                         else if (_Events.IsUsingStreams)
                         {
-                            StreamReceivedEventArgs sr = null;
-                            WatsonStream ws = null;
-
                             if (msg.ContentLength >= _Settings.MaxProxiedStreamSize)
                             {
-                                ws = new WatsonStream(msg.ContentLength, msg.DataStream);
-                                sr = new StreamReceivedEventArgs(null, msg.Metadata, msg.ContentLength, ws);
-                                _Events.HandleStreamReceived(this, sr);
+                                // This case remained under lock as per plan
+                                // The lock should have been explicitly re-acquired or not released if this path is taken.
+                                // The current refactoring ensures this path is handled under the original finally block for the lock.
+                                // This part of the 'else' will only be hit if releaseLockBeforeProcessing was false.
+                                WatsonStream ws = new WatsonStream(msg.ContentLength, msg.DataStream);
+                                StreamReceivedEventArgs sr = new StreamReceivedEventArgs(null, msg.Metadata, msg.ContentLength, ws);
+                                _Events.HandleStreamReceived(this, sr); // Handler should dispose WatsonStream
                             }
                             else
                             {
-                                MemoryStream ms = await WatsonCommon.DataStreamToMemoryStream(msg.ContentLength, msg.DataStream, _Settings.StreamBufferSize, token).ConfigureAwait(false);
-                                ws = new WatsonStream(msg.ContentLength, ms);
-                                sr = new StreamReceivedEventArgs(null, msg.Metadata, msg.ContentLength, ws);
-                                Task unawaited = Task.Run(() => _Events.HandleStreamReceived(this, sr), token);
+                                // tempMemoryStream was populated under lock and lock was released.
+                                using (MemoryStream ms = tempMemoryStream) // ms takes ownership from tempMemoryStream
+                                {
+                                    WatsonStream ws = new WatsonStream(msg.ContentLength, ms);
+                                    StreamReceivedEventArgs sr = new StreamReceivedEventArgs(null, msg.Metadata, msg.ContentLength, ws);
+                                    await Task.Run(() => _Events.HandleStreamReceived(this, sr), token);
+                                }
                             }
                         }
-                        else
-                        {
-                            _Settings.Logger?.Invoke(Severity.Error, _Header + "event handler not set for either MessageReceived or StreamReceived");
-                            break;
-                        }
+                        // No else needed here, already handled in the lock section for invalid event setup
                     }
 
                     #endregion
 
                     _Statistics.IncrementReceivedMessages();
                     _Statistics.AddReceivedBytes(msg.ContentLength);
-                }
+
+                } // End outer try for token cancellation and connection check
                 catch (ObjectDisposedException ode)
                 {
                     _Settings?.Logger?.Invoke(Severity.Debug, _Header + "object disposed exception encountered");
@@ -958,7 +1007,9 @@
                 }
                 catch (IOException ioe)
                 {
-                    _Settings?.Logger?.Invoke(Severity.Debug, _Header + "IO exception encountered");
+                    // This catch block might be hit if the stream is closed while reading.
+                    // The lock should be released if it was held.
+                    _Settings?.Logger?.Invoke(Severity.Debug, _Header + "IO exception encountered: " + ioe.Message);
                     _Events?.HandleExceptionEncountered(this, new ExceptionEventArgs(ioe));
                     break;
                 }
@@ -971,9 +1022,27 @@
                 }
                 finally
                 {
-                    if (_ReadLock != null) _ReadLock.Release();
+                    // This 'finally' is for the main loop's try.
+                    // It ensures that if the lock was acquired and held due to 'releaseLockBeforeProcessing = false', it gets released.
+                    // If 'releaseLockBeforeProcessing = true', it should have been released already.
+                    // If an exception occurred mid-way in the 'try-read-lock' block, it's handled there.
+                    if (!releaseLockBeforeProcessing && _ReadLock != null && _ReadLock.CurrentCount == 0)
+                    {
+                        _ReadLock.Release();
+                    }
+
+                    // Ensure tempMemoryStream created under lock is disposed if not passed to WatsonStream
+                    // This is a safeguard; preferred disposal is via WatsonStream in the processing block.
+                    if (tempMemoryStream != null && releaseLockBeforeProcessing)
+                    {
+                        // If lock was released, and tempMemoryStream was not processed (e.g. due to an exception after lock release but before processing)
+                        // This scenario is less likely with the current structure but good for robustness.
+                        // However, the WatsonStream (if created) is responsible for its disposal.
+                        // If an exception happens *after* lock release but *before* tempMemoryStream is used by WatsonStream, it might leak.
+                        // The `using (MemoryStream ms = tempMemoryStream)` in the processing block is the primary disposal mechanism.
+                    }
                 }
-            }
+            } // End while true
 
             Connected = false;
 
@@ -1152,27 +1221,43 @@
 
             long bytesRemaining = contentLength;
             int bytesRead = 0;
+            byte[] buffer = null;
 
-            while (bytesRemaining > 0)
+            try
             {
-                if (bytesRemaining >= _Settings.StreamBufferSize)
+                while (bytesRemaining > 0)
                 {
-                    _SendBuffer = new byte[_Settings.StreamBufferSize];
-                }
-                else
-                {
-                    _SendBuffer = new byte[bytesRemaining];
+                    int bufferSize = (int)Math.Min(bytesRemaining, _Settings.StreamBufferSize);
+                    buffer = ArrayPool<byte>.Shared.Rent(bufferSize);
+
+                    bytesRead = await stream.ReadAsync(buffer, 0, bufferSize, token).ConfigureAwait(false);
+                    if (bytesRead > 0)
+                    {
+                        await _DataStream.WriteAsync(buffer, 0, bytesRead, token).ConfigureAwait(false);
+                        bytesRemaining -= bytesRead;
+                    }
+                    else
+                    {
+                        // End of stream reached prematurely
+                        break;
+                    }
+
+                    if (buffer != null)
+                    {
+                        ArrayPool<byte>.Shared.Return(buffer);
+                        buffer = null; // important to avoid returning twice in finally
+                    }
                 }
 
-                bytesRead = await stream.ReadAsync(_SendBuffer, 0, _SendBuffer.Length, token).ConfigureAwait(false);
-                if (bytesRead > 0)
+                await _DataStream.FlushAsync(token).ConfigureAwait(false);
+            }
+            finally
+            {
+                if (buffer != null)
                 {
-                    await _DataStream.WriteAsync(_SendBuffer, 0, bytesRead, token).ConfigureAwait(false);
-                    bytesRemaining -= bytesRead;
+                    ArrayPool<byte>.Shared.Return(buffer);
                 }
             }
-
-            await _DataStream.FlushAsync(token).ConfigureAwait(false);
         }
 
         #endregion

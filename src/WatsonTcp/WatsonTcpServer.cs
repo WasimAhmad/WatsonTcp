@@ -15,6 +15,7 @@
     using System.Text;
     using System.Threading;
     using System.Threading.Tasks;
+    using System.Buffers;
 
     /// <summary>
     /// Watson TCP server, with or without SSL.
@@ -405,9 +406,15 @@
         /// <returns>Task with Boolean indicating if the message was sent successfully.</returns>
         public async Task<bool> SendAsync(Guid guid, string data, Dictionary<string, object> metadata = null, int start = 0, CancellationToken token = default)
         {
+            if (token == default(CancellationToken)) token = _Token; // Ensure token is initialized if default
             byte[] bytes = Array.Empty<byte>();
             if (!String.IsNullOrEmpty(data)) bytes = Encoding.UTF8.GetBytes(data);
-            return await SendAsync(guid, bytes, metadata, start, token).ConfigureAwait(false);
+            // For string conversion, start is effectively 0 as we get bytes for the whole string.
+            WatsonCommon.BytesToStream(bytes, 0, out int contentLength, out Stream stream);
+            using (stream)
+            {
+                return await SendAsync(guid, contentLength, stream, metadata, token).ConfigureAwait(false);
+            }
         }
 
         /// <summary>
@@ -421,9 +428,13 @@
         /// <returns>Task with Boolean indicating if the message was sent successfully.</returns>
         public async Task<bool> SendAsync(Guid guid, byte[] data, Dictionary<string, object> metadata = null, int start = 0, CancellationToken token = default)
         {
+            if (token == default(CancellationToken)) token = _Token; // Ensure token is initialized
             if (data == null) data = Array.Empty<byte>();
             WatsonCommon.BytesToStream(data, start, out int contentLength, out Stream stream);
-            return await SendAsync(guid, contentLength, stream, metadata, token).ConfigureAwait(false);
+            using (stream)
+            {
+                return await SendAsync(guid, contentLength, stream, metadata, token).ConfigureAwait(false);
+            }
         }
 
         /// <summary>
@@ -467,10 +478,15 @@
         /// <returns>SyncResponse.</returns>
         public async Task<SyncResponse> SendAndWaitAsync(int timeoutMs, Guid guid, string data, Dictionary<string, object> metadata = null, int start = 0, CancellationToken token = default)
         {
+            if (token == default(CancellationToken)) token = _Token; // Ensure token is initialized
             byte[] bytes = Array.Empty<byte>();
             if (!String.IsNullOrEmpty(data)) bytes = Encoding.UTF8.GetBytes(data);
-            return await SendAndWaitAsync(timeoutMs, guid, bytes, metadata, start, token);
-                // SendAndWaitAsync(timeoutMs, guid, bytes, metadata, token).ConfigureAwait(false);
+            // For string conversion, start is effectively 0.
+            WatsonCommon.BytesToStream(bytes, 0, out int contentLength, out Stream stream);
+            using (stream)
+            {
+                return await SendAndWaitAsync(timeoutMs, guid, contentLength, stream, metadata, token).ConfigureAwait(false);
+            }
         }
 
         /// <summary>
@@ -485,9 +501,13 @@
         /// <returns>SyncResponse.</returns>
         public async Task<SyncResponse> SendAndWaitAsync(int timeoutMs, Guid guid, byte[] data, Dictionary<string, object> metadata = null, int start = 0, CancellationToken token = default)
         {
+            if (token == default(CancellationToken)) token = _Token; // Ensure token is initialized
             if (data == null) data = Array.Empty<byte>();
             WatsonCommon.BytesToStream(data, start, out int contentLength, out Stream stream);
-            return await SendAndWaitAsync(timeoutMs, guid, contentLength, stream, metadata, token);
+            using (stream)
+            {
+                return await SendAndWaitAsync(timeoutMs, guid, contentLength, stream, metadata, token).ConfigureAwait(false);
+            }
         }
 
         /// <summary>
@@ -744,7 +764,6 @@
                     }
 
                     ClientMetadata client = new ClientMetadata(tcpClient);
-                    client.SendBuffer = new byte[_Settings.StreamBufferSize];
 
                     _ClientManager.AddClient(client.Guid, client);
                     _ClientManager.AddClientLastSeen(client.Guid);
@@ -995,7 +1014,7 @@
 
                     if (!IsClientConnected(client)) break;
 
-                    WatsonMessage msg = await _MessageBuilder.BuildFromStream(client.DataStream);
+                    WatsonMessage msg = await _MessageBuilder.BuildFromStream(client.DataStream).ConfigureAwait(false);
                     if (msg == null)
                     {
                         await Task.Delay(30, token).ConfigureAwait(false);
@@ -1026,10 +1045,14 @@
                                         _Events.HandleAuthenticationSucceeded(this, new AuthenticationSucceededEventArgs(client));
 
                                         data = Encoding.UTF8.GetBytes("Authentication successful");
+                                    // authStream for AuthSuccess is typically empty or short, but good practice if it could have content
                                         WatsonCommon.BytesToStream(data, 0, out contentLength, out authStream);
+                                    using (authStream) // Dispose authStream if BytesToStream creates one
+                                    {
                                         authMsg = _MessageBuilder.ConstructNew(contentLength, authStream, false, false, null, null);
                                         authMsg.Status = MessageStatus.AuthSuccess;
-                                        await SendInternalAsync(client, authMsg, 0, null, token).ConfigureAwait(false);
+                                        await SendInternalAsync(client, authMsg, contentLength, authStream, token).ConfigureAwait(false);
+                                    }
                                         continue;
                                     }
                                     else
@@ -1102,17 +1125,20 @@
 
                                 if (syncResp != null)
                                 {
-                                    WatsonCommon.BytesToStream(syncResp.Data, 0, out int contentLength, out Stream stream);
-                                    WatsonMessage respMsg = _MessageBuilder.ConstructNew(
-                                        contentLength,
-                                        stream,
-                                        false,
-                                        true,
-                                        msg.ExpirationUtc.Value,
-                                        syncResp.Metadata);
+                                    WatsonCommon.BytesToStream(syncResp.Data, 0, out int respContentLength, out Stream respStream);
+                                    using (respStream) // Ensure MemoryStream from BytesToStream is disposed
+                                    {
+                                        WatsonMessage respMsg = _MessageBuilder.ConstructNew(
+                                            respContentLength,
+                                            respStream,
+                                            false,
+                                            true,
+                                            msg.ExpirationUtc.Value,
+                                            syncResp.Metadata);
 
-                                    respMsg.ConversationGuid = msg.ConversationGuid;
-                                    await SendInternalAsync(client, respMsg, contentLength, stream, token).ConfigureAwait(false);
+                                        respMsg.ConversationGuid = msg.ConversationGuid;
+                                        await SendInternalAsync(client, respMsg, respContentLength, respStream, token).ConfigureAwait(false);
+                                    }
                                 }
                             }, token);
                         }
@@ -1142,11 +1168,9 @@
                     }
                     else
                     {
-                        byte[] msgData = null;
-
                         if (_Events.IsUsingMessages)
                         {
-                            msgData = await WatsonCommon.ReadMessageDataAsync(msg, _Settings.StreamBufferSize, token).ConfigureAwait(false);
+                            byte[] msgData = await WatsonCommon.ReadMessageDataAsync(msg, _Settings.StreamBufferSize, token).ConfigureAwait(false);
                             MessageReceivedEventArgs mr = new MessageReceivedEventArgs(client, msg.Metadata, msgData);
                             await Task.Run(() => _Events.HandleMessageReceived(this, mr), token);
                         }
@@ -1157,16 +1181,25 @@
 
                             if (msg.ContentLength >= _Settings.MaxProxiedStreamSize)
                             {
+                                // DataStream from WatsonMessageBuilder is directly used.
+                                // WatsonStream will now own it if it's a disposable stream (like NetworkStream/SslStream segment).
                                 ws = new WatsonStream(msg.ContentLength, msg.DataStream);
                                 sr = new StreamReceivedEventArgs(client, msg.Metadata, msg.ContentLength, ws);
-                                _Events.HandleStreamReceived(this, sr);
+                                _Events.HandleStreamReceived(this, sr); // Handler must dispose WatsonStream
                             }
                             else
                             {
-                                MemoryStream ms = await WatsonCommon.DataStreamToMemoryStream(msg.ContentLength, msg.DataStream, _Settings.StreamBufferSize, token).ConfigureAwait(false);
-                                ws = new WatsonStream(msg.ContentLength, ms);
-                                sr = new StreamReceivedEventArgs(client, msg.Metadata, msg.ContentLength, ws);
-                                await Task.Run(() => _Events.HandleStreamReceived(this, sr), token);
+                                // DataStreamToMemoryStream creates a new MemoryStream.
+                                // WatsonStream will take ownership and dispose it.
+                                using (MemoryStream ms = await WatsonCommon.DataStreamToMemoryStream(msg.ContentLength, msg.DataStream, _Settings.StreamBufferSize, token).ConfigureAwait(false))
+                                {
+                                    ws = new WatsonStream(msg.ContentLength, ms);
+                                    sr = new StreamReceivedEventArgs(client, msg.Metadata, msg.ContentLength, ws);
+                                    // Awaiting Task.Run to ensure 'ms' is disposed correctly by the using block
+                                    // if HandleStreamReceived is synchronous. If async void or starts its own task,
+                                    // the handler MUST ensure WatsonStream disposal.
+                                    await Task.Run(() => _Events.HandleStreamReceived(this, sr), token);
+                                }
                             }
                         }
                         else
@@ -1364,27 +1397,43 @@
 
             long bytesRemaining = contentLength;
             int bytesRead = 0;
+            byte[] buffer = null;
 
-            while (bytesRemaining > 0)
+            try
             {
-                if (bytesRemaining >= _Settings.StreamBufferSize)
+                while (bytesRemaining > 0)
                 {
-                    client.SendBuffer = new byte[_Settings.StreamBufferSize];
-                }
-                else
-                {
-                    client.SendBuffer = new byte[bytesRemaining];
+                    int bufferSize = (int)Math.Min(bytesRemaining, _Settings.StreamBufferSize);
+                    buffer = ArrayPool<byte>.Shared.Rent(bufferSize);
+
+                    bytesRead = await stream.ReadAsync(buffer, 0, bufferSize, token).ConfigureAwait(false);
+                    if (bytesRead > 0)
+                    {
+                        await client.DataStream.WriteAsync(buffer, 0, bytesRead, token).ConfigureAwait(false);
+                        bytesRemaining -= bytesRead;
+                    }
+                    else
+                    {
+                        // End of stream reached prematurely
+                        break;
+                    }
+
+                    if (buffer != null)
+                    {
+                        ArrayPool<byte>.Shared.Return(buffer);
+                        buffer = null; // important to avoid returning twice in finally
+                    }
                 }
 
-                bytesRead = await stream.ReadAsync(client.SendBuffer, 0, client.SendBuffer.Length, token).ConfigureAwait(false);
-                if (bytesRead > 0)
+                await client.DataStream.FlushAsync(token).ConfigureAwait(false);
+            }
+            finally
+            {
+                if (buffer != null)
                 {
-                    await client.DataStream.WriteAsync(client.SendBuffer, 0, bytesRead, token).ConfigureAwait(false);
-                    bytesRemaining -= bytesRead;
+                    ArrayPool<byte>.Shared.Return(buffer);
                 }
             }
-
-            await client.DataStream.FlushAsync(token).ConfigureAwait(false);
         }
 
         #endregion
