@@ -87,8 +87,12 @@ func TestTLSConnection(t *testing.T) {
 
 func TestSendSync(t *testing.T) {
 	var conn net.Conn
+	ready := make(chan struct{})
 	cb := server.Callbacks{
-		OnConnect: func(id string, c net.Conn) { conn = c },
+		OnConnect: func(id string, c net.Conn) {
+			conn = c
+			close(ready)
+		},
 		OnMessage: func(id string, msg *message.Message, data []byte) {
 			if msg.SyncRequest {
 				resp := &message.Message{SyncResponse: true, ConversationGUID: msg.ConversationGUID, ContentLength: int64(len("pong"))}
@@ -98,16 +102,17 @@ func TestSendSync(t *testing.T) {
 			}
 		},
 	}
-	srv := startServer(t, "127.0.0.1:30002", nil, cb)
+	srv := startServer(t, "127.0.0.1:30100", nil, cb)
 	defer srv.Stop()
 
-	cli := client.New("127.0.0.1:30002", nil, client.Callbacks{}, nil)
+	cli := client.New("127.0.0.1:30100", nil, client.Callbacks{}, nil)
 	if err := cli.Connect(); err != nil {
 		t.Fatalf("connect: %v", err)
 	}
 	defer cli.Disconnect()
+	<-ready
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	resp, data, err := cli.SendSync(ctx, &message.Message{}, []byte("ping"))
 	if err != nil {
@@ -115,5 +120,51 @@ func TestSendSync(t *testing.T) {
 	}
 	if string(data) != "pong" || !resp.SyncResponse {
 		t.Fatalf("bad response")
+	}
+}
+
+func TestClientIdleDisconnect(t *testing.T) {
+	disc := make(chan struct{})
+	srv := startServer(t, "127.0.0.1:30101", nil, server.Callbacks{})
+	defer srv.Stop()
+
+	opts := client.DefaultOptions()
+	opts.IdleTimeout = 200 * time.Millisecond
+	opts.EvaluationInterval = 50 * time.Millisecond
+	cli := client.New("127.0.0.1:30101", nil, client.Callbacks{OnDisconnect: func() { close(disc) }}, &opts)
+	if err := cli.Connect(); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer cli.Disconnect()
+
+	select {
+	case <-disc:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("client did not disconnect after idle timeout")
+	}
+}
+
+func TestServerIdleDisconnect(t *testing.T) {
+	disc := make(chan struct{})
+	opts := server.DefaultOptions()
+	opts.IdleTimeout = 200 * time.Millisecond
+	opts.CheckInterval = 50 * time.Millisecond
+	cb := server.Callbacks{OnDisconnect: func(id string) { close(disc) }}
+	srv := server.New("127.0.0.1:30102", nil, cb, &opts)
+	if err := srv.Start(); err != nil {
+		t.Fatalf("server start: %v", err)
+	}
+	defer srv.Stop()
+
+	cli := client.New("127.0.0.1:30102", nil, client.Callbacks{}, nil)
+	if err := cli.Connect(); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer cli.Disconnect()
+
+	select {
+	case <-disc:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("server did not disconnect idle client")
 	}
 }
