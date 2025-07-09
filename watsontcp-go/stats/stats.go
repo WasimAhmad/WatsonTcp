@@ -1,6 +1,7 @@
 package stats
 
 import (
+	"fmt"
 	"sync/atomic"
 	"time"
 )
@@ -37,6 +38,24 @@ func (s *Statistics) SentBytes() int64 { return atomic.LoadInt64(&s.sentBytes) }
 // SentMessages returns the total messages sent.
 func (s *Statistics) SentMessages() int64 { return atomic.LoadInt64(&s.sentMsgs) }
 
+// ReceivedMessageSizeAverage returns the average size in bytes of received messages.
+func (s *Statistics) ReceivedMessageSizeAverage() int64 {
+	msgs := s.ReceivedMessages()
+	if msgs == 0 {
+		return 0
+	}
+	return s.ReceivedBytes() / msgs
+}
+
+// SentMessageSizeAverage returns the average size in bytes of sent messages.
+func (s *Statistics) SentMessageSizeAverage() int64 {
+	msgs := s.SentMessages()
+	if msgs == 0 {
+		return 0
+	}
+	return s.SentBytes() / msgs
+}
+
 // AddReceivedBytes increments the received byte counter.
 func (s *Statistics) AddReceivedBytes(n int64) { atomic.AddInt64(&s.receivedBytes, n) }
 
@@ -55,4 +74,19 @@ func (s *Statistics) Reset() {
 	atomic.StoreInt64(&s.receivedMsgs, 0)
 	atomic.StoreInt64(&s.sentBytes, 0)
 	atomic.StoreInt64(&s.sentMsgs, 0)
+}
+
+// String returns a formatted human-readable representation of the statistics.
+func (s *Statistics) String() string {
+	return fmt.Sprintf("--- Statistics ---%s    Started     : %s%s    Uptime      : %s%s    Received    : %s       Bytes    : %d%s       Messages : %d%s       Average  : %d bytes%s    Sent        : %s       Bytes    : %d%s       Messages : %d%s       Average  : %d bytes%s",
+		"\n", s.startTime.Format(time.RFC3339), "\n",
+		s.UpTime().String(), "\n",
+		"\n",
+		s.ReceivedBytes(), "\n",
+		s.ReceivedMessages(), "\n",
+		s.ReceivedMessageSizeAverage(), "\n",
+		"\n",
+		s.SentBytes(), "\n",
+		s.SentMessages(), "\n",
+		s.SentMessageSizeAverage(), "\n")
 }
