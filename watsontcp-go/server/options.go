@@ -30,6 +30,15 @@ type Options struct {
 	// BlockedIPs specifies IP addresses or CIDR ranges that should be
 	// rejected when a client attempts to connect.
 	BlockedIPs []string
+
+	// Logger is used when DebugMessages is true to output debug logs around
+	// send and receive operations. The function should behave like
+	// fmt.Printf.
+	Logger func(format string, args ...any)
+
+	// DebugMessages enables logging of send and receive operations when a
+	// Logger is provided.
+	DebugMessages bool
 }
 
 // KeepAlive mirrors WatsonTcp keepalive settings.
@@ -55,5 +64,7 @@ func DefaultOptions() Options {
 		MaxConnections: 0,
 		PermittedIPs:   nil,
 		BlockedIPs:     nil,
+		Logger:         nil,
+		DebugMessages:  false,
 	}
 }

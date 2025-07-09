@@ -71,6 +71,19 @@ func main() {
 }
 ```
 
+### Debug Logging
+
+Both the client and server expose `Options` fields for debug logging. Set
+`DebugMessages` to `true` and provide a `Logger` function with the same signature
+as `fmt.Printf` to receive logs whenever messages are sent or received.
+
+```go
+opts := client.DefaultOptions()
+opts.Logger = log.Printf
+opts.DebugMessages = true
+c := client.New("127.0.0.1:9000", nil, cb, &opts)
+```
+
 ## Differences from the C# Version
 
 The Go implementation provides the same framing protocol and message structure as the C# library but is a smaller code base with fewer features:

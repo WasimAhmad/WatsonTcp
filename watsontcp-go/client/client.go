@@ -41,6 +41,12 @@ type Client struct {
 	mu           sync.Mutex
 }
 
+func (c *Client) logf(format string, args ...any) {
+	if c.options.Logger != nil && c.options.DebugMessages {
+		c.options.Logger(format, args...)
+	}
+}
+
 type response struct {
 	msg  *message.Message
 	data []byte
@@ -144,6 +150,7 @@ func (c *Client) Send(msg *message.Message, data []byte) error {
 	if c.conn == nil {
 		return errors.New("not connected")
 	}
+	c.logf("sending message: %+v length=%d", msg, len(data))
 	msg.ContentLength = int64(len(data))
 	msg.TimestampUtc = time.Now().UTC()
 	header, err := message.BuildHeader(msg)
@@ -162,6 +169,7 @@ func (c *Client) Send(msg *message.Message, data []byte) error {
 	}
 	c.stats.IncrementSentMessages()
 	c.stats.AddSentBytes(int64(len(header) + len(data)))
+	c.logf("sent %d bytes", len(header)+len(data))
 	return nil
 }
 
@@ -172,6 +180,7 @@ func (c *Client) SendStream(msg *message.Message, r io.Reader, length int64) err
 	if r == nil {
 		return errors.New("reader nil")
 	}
+	c.logf("sending stream message: %+v length=%d", msg, length)
 	msg.ContentLength = length
 	msg.TimestampUtc = time.Now().UTC()
 	header, err := message.BuildHeader(msg)
@@ -190,6 +199,7 @@ func (c *Client) SendStream(msg *message.Message, r io.Reader, length int64) err
 	}
 	c.stats.IncrementSentMessages()
 	c.stats.AddSentBytes(int64(len(header)) + length)
+	c.logf("sent %d bytes", int64(len(header))+length)
 	return nil
 }
 
@@ -233,6 +243,7 @@ func (c *Client) readLoop() {
 			}
 			return
 		}
+		c.logf("received header: %+v", msg)
 		if c.callbacks.OnStream != nil && c.callbacks.OnMessage == nil && !msg.SyncResponse {
 			lr := &io.LimitedReader{R: c.conn, N: msg.ContentLength}
 			c.stats.IncrementReceivedMessages()
@@ -250,6 +261,7 @@ func (c *Client) readLoop() {
 		if _, err := io.ReadFull(c.conn, payload); err != nil {
 			return
 		}
+		c.logf("received %d bytes", len(payload))
 		c.stats.IncrementReceivedMessages()
 		c.stats.AddReceivedBytes(int64(len(payload)))
 		if msg.SyncResponse && msg.ConversationGUID != "" {
