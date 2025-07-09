@@ -121,6 +121,33 @@ func (c *Client) Connect() error {
 			return errors.New("authentication failed")
 		}
 	}
+
+	// expect registration message from server
+	if err := c.conn.SetReadDeadline(time.Now().Add(c.options.ConnectTimeout)); err != nil {
+		c.conn.Close()
+		c.conn = nil
+		return err
+	}
+	regMsg, err := message.ParseHeader(c.conn)
+	if err == nil {
+		if regMsg.ContentLength > 0 {
+			if _, err = io.CopyN(io.Discard, c.conn, regMsg.ContentLength); err != nil {
+				c.conn.SetReadDeadline(time.Time{})
+				c.conn.Close()
+				c.conn = nil
+				return err
+			}
+		}
+	}
+	c.conn.SetReadDeadline(time.Time{})
+	if err != nil || regMsg.Status != message.StatusRegisterClient {
+		c.conn.Close()
+		c.conn = nil
+		if err != nil {
+			return err
+		}
+		return errors.New("registration failed")
+	}
 	c.mu.Lock()
 	c.lastReceived = time.Now()
 	c.mu.Unlock()
