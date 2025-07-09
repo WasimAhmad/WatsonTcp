@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/yourname/watsontcp-go/message"
+	"github.com/yourname/watsontcp-go/stats"
 )
 
 type Callbacks struct {
@@ -27,6 +28,9 @@ type Client struct {
 
 	callbacks Callbacks
 
+	options Options
+	stats   *stats.Statistics
+
 	conn    net.Conn
 	writeMu sync.Mutex
 	respMap sync.Map
@@ -40,11 +44,22 @@ type response struct {
 	err  error
 }
 
-func New(addr string, tlsConf *tls.Config, cb Callbacks) *Client {
+// Statistics returns runtime counters for the client.
+func (c *Client) Statistics() *stats.Statistics {
+	return c.stats
+}
+
+func New(addr string, tlsConf *tls.Config, cb Callbacks, opts *Options) *Client {
+	if opts == nil {
+		defaultOpts := DefaultOptions()
+		opts = &defaultOpts
+	}
 	return &Client{
 		Addr:      addr,
 		TLSConfig: tlsConf,
 		callbacks: cb,
+		options:   *opts,
+		stats:     stats.New(),
 		done:      make(chan struct{}),
 	}
 }
@@ -53,7 +68,11 @@ func (c *Client) Connect() error {
 	if c.conn != nil {
 		return errors.New("already connected")
 	}
-	conn, err := net.Dial("tcp", c.Addr)
+	d := net.Dialer{Timeout: c.options.ConnectTimeout}
+	if c.options.KeepAlive.Enable {
+		d.KeepAlive = c.options.KeepAlive.Time
+	}
+	conn, err := d.Dial("tcp", c.Addr)
 	if err != nil {
 		return err
 	}
@@ -105,6 +124,8 @@ func (c *Client) Send(msg *message.Message, data []byte) error {
 			return err
 		}
 	}
+	c.stats.IncrementSentMessages()
+	c.stats.AddSentBytes(int64(len(header) + len(data)))
 	return nil
 }
 
@@ -152,6 +173,8 @@ func (c *Client) readLoop() {
 		if _, err := io.ReadFull(c.conn, payload); err != nil {
 			return
 		}
+		c.stats.IncrementReceivedMessages()
+		c.stats.AddReceivedBytes(int64(len(payload)))
 		if msg.SyncResponse && msg.ConversationGUID != "" {
 			if val, ok := c.respMap.Load(msg.ConversationGUID); ok {
 				ch := val.(chan *response)

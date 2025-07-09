@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/yourname/watsontcp-go/message"
+	"github.com/yourname/watsontcp-go/stats"
 )
 
 type Callbacks struct {
@@ -22,6 +23,9 @@ type Server struct {
 	TLSConfig *tls.Config
 
 	callbacks Callbacks
+
+	options Options
+	stats   *stats.Statistics
 
 	listener net.Listener
 	conns    map[string]*clientConn
@@ -38,14 +42,25 @@ type clientConn struct {
 	lastActive time.Time
 }
 
-func New(addr string, tlsConf *tls.Config, cb Callbacks) *Server {
+// Statistics returns runtime counters for the server.
+func (s *Server) Statistics() *stats.Statistics {
+	return s.stats
+}
+
+func New(addr string, tlsConf *tls.Config, cb Callbacks, opts *Options) *Server {
+	if opts == nil {
+		defaultOpts := DefaultOptions()
+		opts = &defaultOpts
+	}
 	return &Server{
 		Addr:          addr,
 		TLSConfig:     tlsConf,
 		callbacks:     cb,
+		options:       *opts,
+		stats:         stats.New(),
 		conns:         make(map[string]*clientConn),
-		idleTimeout:   30 * time.Second,
-		checkInterval: 5 * time.Second,
+		idleTimeout:   opts.IdleTimeout,
+		checkInterval: opts.CheckInterval,
 		done:          make(chan struct{}),
 	}
 }
@@ -132,6 +147,8 @@ func (s *Server) handleConn(id string) {
 		if _, err := io.ReadFull(c.conn, payload); err != nil {
 			return
 		}
+		s.stats.IncrementReceivedMessages()
+		s.stats.AddReceivedBytes(int64(len(payload)))
 		s.mu.Lock()
 		c.lastActive = time.Now()
 		s.mu.Unlock()
