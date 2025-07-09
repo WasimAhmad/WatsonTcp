@@ -1,14 +1,29 @@
 # WatsonTcp for Go
 
-This directory contains an experimental Go implementation of WatsonTcp. The API mirrors the C# library where possible and provides simple client and server types.
+WatsonTcp provides a simple TCP messaging framework with message framing,
+authentication, and connection management. This Go implementation shares the
+same wire protocol as the C# library and can communicate with it directly.
 
-## Installing
+## Features
+
+- Message framing compatible with WatsonTcp for C#
+- TLS encryption support
+- Optional preshared key authentication
+- Idle timeouts and keepalive settings
+- Send and receive byte slices or streams
+- Synchronous request/response messaging
+- Connection filters (allow/deny lists)
+- Connection limit enforcement
+- Runtime statistics (bytes and messages sent/received)
+- Optional debug logging with customizable logger
+
+## Installation
 
 ```
 go get github.com/yourname/watsontcp-go
 ```
 
-Import the desired packages:
+Import the packages you need:
 
 ```go
 import (
@@ -25,9 +40,10 @@ package main
 
 import (
     "fmt"
+    "log"
+
     "github.com/yourname/watsontcp-go/message"
     "github.com/yourname/watsontcp-go/server"
-    "log"
 )
 
 func main() {
@@ -50,9 +66,10 @@ func main() {
 package main
 
 import (
+    "log"
+
     "github.com/yourname/watsontcp-go/client"
     "github.com/yourname/watsontcp-go/message"
-    "log"
 )
 
 func main() {
@@ -73,9 +90,9 @@ func main() {
 
 ### Debug Logging
 
-Both the client and server expose `Options` fields for debug logging. Set
-`DebugMessages` to `true` and provide a `Logger` function with the same signature
-as `fmt.Printf` to receive logs whenever messages are sent or received.
+Both the client and server accept `Options` structures which enable debug
+logging. Set `DebugMessages` to `true` and provide a `Logger` function matching
+`fmt.Printf` to receive logs whenever messages are sent or received.
 
 ```go
 opts := client.DefaultOptions()
@@ -84,23 +101,28 @@ opts.DebugMessages = true
 c := client.New("127.0.0.1:9000", nil, cb, &opts)
 ```
 
-## Differences from the C# Version
-
-The Go implementation provides the same framing protocol and message structure as the C# library but is a smaller code base with fewer features:
-
-- Only a subset of configuration options are implemented (e.g. keepalive and authentication options are present but not fully enforced).
-- Event callbacks are simple function pointers rather than events/delegates.
-- Client and server statistics are limited to byte and message counts.
-
-Because the wire protocol is shared, a Go client can communicate with a C# server and vice versa if the framing and message fields match. Features that are not implemented in one language (such as preshared-key authentication) must be handled manually or disabled on the peer.
-
-
 ## Examples
 
-The `examples/` directory contains small programs demonstrating library features. Notable examples include:
+The `examples` directory contains small programs that demonstrate most
+library features:
 
-- `Test.Metadata` – sending messages with metadata maps.
-- `Test.Parallel` – multiple clients sending in parallel to a single server.
-- `Test.Reconnect` – reconnect logic that repeatedly connects and disconnects.
+- `Test.Client` – interactive console client
+- `Test.Server` – simple console server
+- `Test.FileTransfer` – streaming data between client and server
+- `Test.Metadata` – sending messages with metadata maps
+- `Test.Parallel` – multiple clients sending concurrently
+- `Test.Reconnect` – reconnect logic for unreliable networks
+- `Test.SyncMessages` – synchronous request/response messaging
 
-Run `go build ./examples/<ExampleName>` to compile an example.
+Build an example with:
+
+```
+go build ./examples/<ExampleName>
+```
+
+## Compatibility with C#
+
+Because the framing and message structure mirror the C# implementation, a Go
+client can communicate with a C# server and vice versa. Ensure that features
+such as preshared key authentication are enabled or disabled consistently on
+both sides.
