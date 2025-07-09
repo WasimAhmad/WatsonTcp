@@ -20,6 +20,7 @@ type Callbacks struct {
 	OnConnect    func()
 	OnDisconnect func()
 	OnMessage    func(msg *message.Message, data []byte)
+	OnStream     func(msg *message.Message, r io.Reader)
 }
 
 type Client struct {
@@ -164,6 +165,34 @@ func (c *Client) Send(msg *message.Message, data []byte) error {
 	return nil
 }
 
+func (c *Client) SendStream(msg *message.Message, r io.Reader, length int64) error {
+	if c.conn == nil {
+		return errors.New("not connected")
+	}
+	if r == nil {
+		return errors.New("reader nil")
+	}
+	msg.ContentLength = length
+	msg.TimestampUtc = time.Now().UTC()
+	header, err := message.BuildHeader(msg)
+	if err != nil {
+		return err
+	}
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	if _, err := c.conn.Write(header); err != nil {
+		return err
+	}
+	if length > 0 {
+		if _, err := io.CopyN(c.conn, r, length); err != nil {
+			return err
+		}
+	}
+	c.stats.IncrementSentMessages()
+	c.stats.AddSentBytes(int64(len(header)) + length)
+	return nil
+}
+
 func (c *Client) SendSync(ctx context.Context, msg *message.Message, data []byte) (*message.Message, []byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -203,6 +232,19 @@ func (c *Client) readLoop() {
 				// handle error
 			}
 			return
+		}
+		if c.callbacks.OnStream != nil && c.callbacks.OnMessage == nil && !msg.SyncResponse {
+			lr := &io.LimitedReader{R: c.conn, N: msg.ContentLength}
+			c.stats.IncrementReceivedMessages()
+			c.stats.AddReceivedBytes(msg.ContentLength)
+			c.callbacks.OnStream(msg, lr)
+			if lr.N > 0 {
+				io.CopyN(io.Discard, c.conn, lr.N)
+			}
+			c.mu.Lock()
+			c.lastReceived = time.Now()
+			c.mu.Unlock()
+			continue
 		}
 		payload := make([]byte, msg.ContentLength)
 		if _, err := io.ReadFull(c.conn, payload); err != nil {
