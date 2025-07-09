@@ -42,6 +42,12 @@ type Server struct {
 	done chan struct{}
 }
 
+func (s *Server) logf(format string, args ...any) {
+	if s.options.Logger != nil && s.options.DebugMessages {
+		s.options.Logger(format, args...)
+	}
+}
+
 type clientConn struct {
 	conn       net.Conn
 	lastActive time.Time
@@ -191,6 +197,7 @@ func (s *Server) handleConn(id string) {
 			}
 			return
 		}
+		s.logf("received from %s: %+v", id, msg)
 		if s.callbacks.OnStream != nil && s.callbacks.OnMessage == nil {
 			lr := &io.LimitedReader{R: c.conn, N: msg.ContentLength}
 			s.stats.IncrementReceivedMessages()
@@ -207,6 +214,7 @@ func (s *Server) handleConn(id string) {
 			if _, err := io.ReadFull(c.conn, payload); err != nil {
 				return
 			}
+			s.logf("received %d bytes from %s", len(payload), id)
 			s.stats.IncrementReceivedMessages()
 			s.stats.AddReceivedBytes(int64(len(payload)))
 			s.mu.Lock()
@@ -229,6 +237,7 @@ func (s *Server) SendStream(id string, msg *message.Message, r io.Reader, length
 	if c == nil {
 		return errors.New("unknown client")
 	}
+	s.logf("sending to %s: %+v length=%d", id, msg, length)
 	msg.ContentLength = length
 	msg.TimestampUtc = time.Now().UTC()
 	header, err := message.BuildHeader(msg)
@@ -247,6 +256,7 @@ func (s *Server) SendStream(id string, msg *message.Message, r io.Reader, length
 	}
 	s.stats.IncrementSentMessages()
 	s.stats.AddSentBytes(int64(len(header)) + length)
+	s.logf("sent %d bytes to %s", int64(len(header))+length, id)
 	return nil
 }
 
