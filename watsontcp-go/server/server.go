@@ -106,6 +106,14 @@ func (s *Server) acceptLoop() {
 			}
 			continue
 		}
+		if s.options.KeepAlive.Enable {
+			if tcp, ok := conn.(*net.TCPConn); ok {
+				tcp.SetKeepAlive(true)
+				if s.options.KeepAlive.Interval > 0 {
+					tcp.SetKeepAlivePeriod(s.options.KeepAlive.Interval)
+				}
+			}
+		}
 		id := conn.RemoteAddr().String()
 		s.mu.Lock()
 		s.conns[id] = &clientConn{conn: conn, lastActive: time.Now()}

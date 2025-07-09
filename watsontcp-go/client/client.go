@@ -31,11 +31,13 @@ type Client struct {
 	options Options
 	stats   *stats.Statistics
 
-	conn    net.Conn
-	writeMu sync.Mutex
-	respMap sync.Map
-	done    chan struct{}
-	dcOnce  sync.Once
+	conn         net.Conn
+	writeMu      sync.Mutex
+	respMap      sync.Map
+	done         chan struct{}
+	dcOnce       sync.Once
+	lastReceived time.Time
+	mu           sync.Mutex
 }
 
 type response struct {
@@ -85,10 +87,16 @@ func (c *Client) Connect() error {
 		conn = tlsConn
 	}
 	c.conn = conn
+	c.mu.Lock()
+	c.lastReceived = time.Now()
+	c.mu.Unlock()
 	if c.callbacks.OnConnect != nil {
 		go c.callbacks.OnConnect()
 	}
 	go c.readLoop()
+	if c.options.IdleTimeout > 0 {
+		go c.idleMonitor()
+	}
 	return nil
 }
 
@@ -186,6 +194,28 @@ func (c *Client) readLoop() {
 		}
 		if c.callbacks.OnMessage != nil {
 			go c.callbacks.OnMessage(msg, payload)
+		}
+		c.mu.Lock()
+		c.lastReceived = time.Now()
+		c.mu.Unlock()
+	}
+}
+
+func (c *Client) idleMonitor() {
+	ticker := time.NewTicker(c.options.EvaluationInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			c.mu.Lock()
+			last := c.lastReceived
+			c.mu.Unlock()
+			if time.Since(last) > c.options.IdleTimeout {
+				c.Disconnect()
+				return
+			}
+		case <-c.done:
+			return
 		}
 	}
 }
