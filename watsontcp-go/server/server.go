@@ -143,6 +143,27 @@ func (s *Server) handleConn(id string) {
 			s.callbacks.OnDisconnect(id)
 		}
 	}()
+	if s.options.PresharedKey != "" {
+		msg, err := message.ParseHeader(c.conn)
+		if err != nil {
+			return
+		}
+		payload := make([]byte, msg.ContentLength)
+		if _, err := io.ReadFull(c.conn, payload); err != nil {
+			return
+		}
+		if msg.Status != message.StatusAuthRequested || string(msg.PresharedKey) != s.options.PresharedKey {
+			resp := &message.Message{Status: message.StatusAuthFailure}
+			if hdr, err := message.BuildHeader(resp); err == nil {
+				c.conn.Write(hdr)
+			}
+			return
+		}
+		resp := &message.Message{Status: message.StatusAuthSuccess}
+		if hdr, err := message.BuildHeader(resp); err == nil {
+			c.conn.Write(hdr)
+		}
+	}
 	for {
 		msg, err := message.ParseHeader(c.conn)
 		if err != nil {

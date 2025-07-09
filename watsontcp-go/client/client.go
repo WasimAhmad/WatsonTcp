@@ -87,6 +87,33 @@ func (c *Client) Connect() error {
 		conn = tlsConn
 	}
 	c.conn = conn
+	if c.options.PresharedKey != "" {
+		authMsg := &message.Message{Status: message.StatusAuthRequested, PresharedKey: []byte(c.options.PresharedKey)}
+		if err := c.Send(authMsg, nil); err != nil {
+			c.conn.Close()
+			c.conn = nil
+			return err
+		}
+		if err := c.conn.SetReadDeadline(time.Now().Add(c.options.ConnectTimeout)); err != nil {
+			c.conn.Close()
+			c.conn = nil
+			return err
+		}
+		resp, err := message.ParseHeader(c.conn)
+		if err == nil {
+			payload := make([]byte, resp.ContentLength)
+			_, err = io.ReadFull(c.conn, payload)
+		}
+		c.conn.SetReadDeadline(time.Time{})
+		if err != nil || resp.Status != message.StatusAuthSuccess {
+			c.conn.Close()
+			c.conn = nil
+			if err != nil {
+				return err
+			}
+			return errors.New("authentication failed")
+		}
+	}
 	c.mu.Lock()
 	c.lastReceived = time.Now()
 	c.mu.Unlock()
