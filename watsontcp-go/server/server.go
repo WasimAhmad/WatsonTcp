@@ -34,6 +34,10 @@ type Server struct {
 	idleTimeout   time.Duration
 	checkInterval time.Duration
 
+	maxConnections int
+	permittedIPs   []string
+	blockedIPs     []string
+
 	done chan struct{}
 }
 
@@ -53,15 +57,18 @@ func New(addr string, tlsConf *tls.Config, cb Callbacks, opts *Options) *Server 
 		opts = &defaultOpts
 	}
 	return &Server{
-		Addr:          addr,
-		TLSConfig:     tlsConf,
-		callbacks:     cb,
-		options:       *opts,
-		stats:         stats.New(),
-		conns:         make(map[string]*clientConn),
-		idleTimeout:   opts.IdleTimeout,
-		checkInterval: opts.CheckInterval,
-		done:          make(chan struct{}),
+		Addr:           addr,
+		TLSConfig:      tlsConf,
+		callbacks:      cb,
+		options:        *opts,
+		stats:          stats.New(),
+		conns:          make(map[string]*clientConn),
+		idleTimeout:    opts.IdleTimeout,
+		checkInterval:  opts.CheckInterval,
+		maxConnections: opts.MaxConnections,
+		permittedIPs:   opts.PermittedIPs,
+		blockedIPs:     opts.BlockedIPs,
+		done:           make(chan struct{}),
 	}
 }
 
@@ -106,6 +113,17 @@ func (s *Server) acceptLoop() {
 			}
 			continue
 		}
+		remoteHost, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
+		if !s.ipAllowed(remoteHost) {
+			conn.Close()
+			continue
+		}
+		s.mu.Lock()
+		if s.maxConnections > 0 && len(s.conns) >= s.maxConnections {
+			s.mu.Unlock()
+			conn.Close()
+			continue
+		}
 		if s.options.KeepAlive.Enable {
 			if tcp, ok := conn.(*net.TCPConn); ok {
 				tcp.SetKeepAlive(true)
@@ -115,7 +133,6 @@ func (s *Server) acceptLoop() {
 			}
 		}
 		id := conn.RemoteAddr().String()
-		s.mu.Lock()
 		s.conns[id] = &clientConn{conn: conn, lastActive: time.Now()}
 		s.mu.Unlock()
 		if s.callbacks.OnConnect != nil {
@@ -214,4 +231,35 @@ func (s *Server) monitorLoop() {
 			return
 		}
 	}
+}
+
+func (s *Server) ipAllowed(addr string) bool {
+	ip := net.ParseIP(addr)
+	if ip == nil {
+		return false
+	}
+	for _, b := range s.blockedIPs {
+		if ipMatch(ip, b) {
+			return false
+		}
+	}
+	if len(s.permittedIPs) > 0 {
+		for _, p := range s.permittedIPs {
+			if ipMatch(ip, p) {
+				return true
+			}
+		}
+		return false
+	}
+	return true
+}
+
+func ipMatch(ip net.IP, pattern string) bool {
+	if ip2 := net.ParseIP(pattern); ip2 != nil {
+		return ip.Equal(ip2)
+	}
+	if _, netw, err := net.ParseCIDR(pattern); err == nil && netw != nil {
+		return netw.Contains(ip)
+	}
+	return false
 }

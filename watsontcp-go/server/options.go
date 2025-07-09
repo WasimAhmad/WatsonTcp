@@ -17,6 +17,19 @@ type Options struct {
 
 	// PresharedKey expected from clients.
 	PresharedKey string
+
+	// MaxConnections specifies the maximum number of concurrent
+	// connections the server will accept. Zero means unlimited.
+	MaxConnections int
+
+	// PermittedIPs is an optional list of IP addresses or CIDR ranges
+	// that are allowed to connect. If empty, all clients are permitted
+	// unless present in BlockedIPs.
+	PermittedIPs []string
+
+	// BlockedIPs specifies IP addresses or CIDR ranges that should be
+	// rejected when a client attempts to connect.
+	BlockedIPs []string
 }
 
 // KeepAlive mirrors WatsonTcp keepalive settings.
@@ -39,5 +52,8 @@ func DefaultOptions() Options {
 			Time:       5 * time.Second,
 			RetryCount: 5,
 		},
+		MaxConnections: 0,
+		PermittedIPs:   nil,
+		BlockedIPs:     nil,
 	}
 }

@@ -214,3 +214,48 @@ func TestPresharedKeyFailure(t *testing.T) {
 		t.Fatalf("expected auth failure")
 	}
 }
+
+func TestMaxConnectionsLimit(t *testing.T) {
+	opts := server.DefaultOptions()
+	opts.MaxConnections = 1
+	srv := server.New("127.0.0.1:30120", nil, server.Callbacks{}, &opts)
+	if err := srv.Start(); err != nil {
+		t.Fatalf("server start: %v", err)
+	}
+	defer srv.Stop()
+
+	cli1 := client.New("127.0.0.1:30120", nil, client.Callbacks{}, nil)
+	if err := cli1.Connect(); err != nil {
+		t.Fatalf("cli1 connect: %v", err)
+	}
+	defer cli1.Disconnect()
+
+	cli2 := client.New("127.0.0.1:30120", nil, client.Callbacks{}, nil)
+	if err := cli2.Connect(); err == nil {
+		// attempt a send to verify connection
+		err = cli2.Send(&message.Message{}, []byte("test"))
+		if err == nil {
+			cli2.Disconnect()
+			t.Fatalf("expected connection limit to reject second client")
+		}
+	}
+}
+
+func TestIPBlocking(t *testing.T) {
+	opts := server.DefaultOptions()
+	opts.BlockedIPs = []string{"127.0.0.1"}
+	srv := server.New("127.0.0.1:30121", nil, server.Callbacks{}, &opts)
+	if err := srv.Start(); err != nil {
+		t.Fatalf("server start: %v", err)
+	}
+	defer srv.Stop()
+
+	cli := client.New("127.0.0.1:30121", nil, client.Callbacks{}, nil)
+	if err := cli.Connect(); err == nil {
+		err = cli.Send(&message.Message{}, []byte("test"))
+		if err == nil {
+			cli.Disconnect()
+			t.Fatalf("expected connection to be blocked")
+		}
+	}
+}
