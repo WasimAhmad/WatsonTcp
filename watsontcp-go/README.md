@@ -94,3 +94,13 @@ The Go implementation provides the same framing protocol and message structure a
 
 Because the wire protocol is shared, a Go client can communicate with a C# server and vice versa if the framing and message fields match. Features that are not implemented in one language (such as preshared-key authentication) must be handled manually or disabled on the peer.
 
+
+## Examples
+
+The `examples/` directory contains small programs demonstrating library features. Notable examples include:
+
+- `Test.Metadata` – sending messages with metadata maps.
+- `Test.Parallel` – multiple clients sending in parallel to a single server.
+- `Test.Reconnect` – reconnect logic that repeatedly connects and disconnects.
+
+Run `go build ./examples/<ExampleName>` to compile an example.
