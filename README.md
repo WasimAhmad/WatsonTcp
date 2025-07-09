@@ -27,6 +27,9 @@ Special thanks to the following people for their support and contributions to th
 @YorVeX @tovich37 @sancheolz @lunedis @ShayanFiroozi
 
 If you'd like to contribute, please jump right into the source code and create a pull request, or, file an issue with your enhancement request. 
+## Go Implementation
+A reference Go version is available in `watsontcp-go`. See [watsontcp-go/README.md](watsontcp-go/README.md) for usage.
+
 
 ## New in v6.0.x
 
