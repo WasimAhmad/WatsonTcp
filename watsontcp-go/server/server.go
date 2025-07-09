@@ -16,6 +16,7 @@ type Callbacks struct {
 	OnConnect    func(id string, conn net.Conn)
 	OnDisconnect func(id string)
 	OnMessage    func(id string, msg *message.Message, data []byte)
+	OnStream     func(id string, msg *message.Message, r io.Reader)
 }
 
 type Server struct {
@@ -44,6 +45,7 @@ type Server struct {
 type clientConn struct {
 	conn       net.Conn
 	lastActive time.Time
+	mu         sync.Mutex
 }
 
 // Statistics returns runtime counters for the server.
@@ -189,19 +191,63 @@ func (s *Server) handleConn(id string) {
 			}
 			return
 		}
-		payload := make([]byte, msg.ContentLength)
-		if _, err := io.ReadFull(c.conn, payload); err != nil {
-			return
-		}
-		s.stats.IncrementReceivedMessages()
-		s.stats.AddReceivedBytes(int64(len(payload)))
-		s.mu.Lock()
-		c.lastActive = time.Now()
-		s.mu.Unlock()
-		if s.callbacks.OnMessage != nil {
-			s.callbacks.OnMessage(id, msg, payload)
+		if s.callbacks.OnStream != nil && s.callbacks.OnMessage == nil {
+			lr := &io.LimitedReader{R: c.conn, N: msg.ContentLength}
+			s.stats.IncrementReceivedMessages()
+			s.stats.AddReceivedBytes(msg.ContentLength)
+			s.mu.Lock()
+			c.lastActive = time.Now()
+			s.mu.Unlock()
+			s.callbacks.OnStream(id, msg, lr)
+			if lr.N > 0 {
+				io.CopyN(io.Discard, c.conn, lr.N)
+			}
+		} else {
+			payload := make([]byte, msg.ContentLength)
+			if _, err := io.ReadFull(c.conn, payload); err != nil {
+				return
+			}
+			s.stats.IncrementReceivedMessages()
+			s.stats.AddReceivedBytes(int64(len(payload)))
+			s.mu.Lock()
+			c.lastActive = time.Now()
+			s.mu.Unlock()
+			if s.callbacks.OnMessage != nil {
+				s.callbacks.OnMessage(id, msg, payload)
+			}
 		}
 	}
+}
+
+func (s *Server) SendStream(id string, msg *message.Message, r io.Reader, length int64) error {
+	if r == nil {
+		return errors.New("reader nil")
+	}
+	s.mu.Lock()
+	c := s.conns[id]
+	s.mu.Unlock()
+	if c == nil {
+		return errors.New("unknown client")
+	}
+	msg.ContentLength = length
+	msg.TimestampUtc = time.Now().UTC()
+	header, err := message.BuildHeader(msg)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, err := c.conn.Write(header); err != nil {
+		return err
+	}
+	if length > 0 {
+		if _, err := io.CopyN(c.conn, r, length); err != nil {
+			return err
+		}
+	}
+	s.stats.IncrementSentMessages()
+	s.stats.AddSentBytes(int64(len(header)) + length)
+	return nil
 }
 
 func (s *Server) monitorLoop() {
