@@ -129,6 +129,9 @@ func (s *Server) acceptLoop() {
 		s.mu.Lock()
 		if s.maxConnections > 0 && len(s.conns) >= s.maxConnections {
 			s.mu.Unlock()
+			if tcp, ok := conn.(*net.TCPConn); ok {
+				tcp.SetLinger(0)
+			}
 			conn.Close()
 			continue
 		}
@@ -186,6 +189,13 @@ func (s *Server) handleConn(id string) {
 		}
 		resp := &message.Message{Status: message.StatusAuthSuccess}
 		if hdr, err := message.BuildHeader(resp); err == nil {
+			c.conn.Write(hdr)
+		}
+		if hdr, err := message.BuildHeader(&message.Message{Status: message.StatusRegisterClient}); err == nil {
+			c.conn.Write(hdr)
+		}
+	} else {
+		if hdr, err := message.BuildHeader(&message.Message{Status: message.StatusRegisterClient}); err == nil {
 			c.conn.Write(hdr)
 		}
 	}

@@ -1,7 +1,6 @@
 package message
 
 import (
-	"bufio"
 	"encoding/json"
 	"errors"
 	"io"
@@ -26,22 +25,15 @@ func ParseHeader(r io.Reader) (*Message, error) {
 		return nil, errors.New("reader nil")
 	}
 
-	br := bufio.NewReader(r)
 	header := make([]byte, 0, 24)
-
-	// read first 24 bytes
-	for len(header) < 24 {
-		b, err := br.ReadByte()
-		if err != nil {
+	buf := make([]byte, 1)
+	for {
+		if _, err := io.ReadFull(r, buf); err != nil {
 			return nil, err
 		}
-		header = append(header, b)
-	}
-
-	for {
-		l := len(header)
-		if l >= 4 {
-			end := header[l-4:]
+		header = append(header, buf[0])
+		if len(header) >= 4 {
+			end := header[len(header)-4:]
 			if end[0] == 0 && end[1] == 0 && end[2] == 0 && end[3] == 0 {
 				return nil, errors.New("null header indicates peer disconnected")
 			}
@@ -49,11 +41,6 @@ func ParseHeader(r io.Reader) (*Message, error) {
 				break
 			}
 		}
-		b, err := br.ReadByte()
-		if err != nil {
-			return nil, err
-		}
-		header = append(header, b)
 	}
 
 	jsonPart := header[:len(header)-4]
