@@ -168,3 +168,49 @@ func TestServerIdleDisconnect(t *testing.T) {
 		t.Fatalf("server did not disconnect idle client")
 	}
 }
+
+func TestPresharedKeySuccess(t *testing.T) {
+	done := make(chan struct{})
+	srvOpts := server.DefaultOptions()
+	srvOpts.PresharedKey = "secret"
+	cb := server.Callbacks{OnMessage: func(id string, msg *message.Message, data []byte) { close(done) }}
+	srv := server.New("127.0.0.1:30110", nil, cb, &srvOpts)
+	if err := srv.Start(); err != nil {
+		t.Fatalf("server start: %v", err)
+	}
+	defer srv.Stop()
+
+	cliOpts := client.DefaultOptions()
+	cliOpts.PresharedKey = "secret"
+	cli := client.New("127.0.0.1:30110", nil, client.Callbacks{}, &cliOpts)
+	if err := cli.Connect(); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer cli.Disconnect()
+	if err := cli.Send(&message.Message{}, []byte("hi")); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatalf("message not received")
+	}
+}
+
+func TestPresharedKeyFailure(t *testing.T) {
+	srvOpts := server.DefaultOptions()
+	srvOpts.PresharedKey = "secret"
+	srv := server.New("127.0.0.1:30111", nil, server.Callbacks{}, &srvOpts)
+	if err := srv.Start(); err != nil {
+		t.Fatalf("server start: %v", err)
+	}
+	defer srv.Stop()
+
+	cliOpts := client.DefaultOptions()
+	cliOpts.PresharedKey = "wrong"
+	cli := client.New("127.0.0.1:30111", nil, client.Callbacks{}, &cliOpts)
+	if err := cli.Connect(); err == nil {
+		cli.Disconnect()
+		t.Fatalf("expected auth failure")
+	}
+}
